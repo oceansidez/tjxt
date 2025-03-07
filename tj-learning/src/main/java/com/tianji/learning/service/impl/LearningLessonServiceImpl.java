@@ -5,25 +5,30 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.tianji.api.client.course.CatalogueClient;
 import com.tianji.api.client.course.CourseClient;
+import com.tianji.api.dto.IdAndNumDTO;
 import com.tianji.api.dto.course.CataSimpleInfoDTO;
 import com.tianji.api.dto.course.CourseFullInfoDTO;
 import com.tianji.api.dto.course.CourseSimpleInfoDTO;
 import com.tianji.common.domain.dto.PageDTO;
 import com.tianji.common.domain.query.PageQuery;
 import com.tianji.common.exceptions.BadRequestException;
-import com.tianji.common.utils.BeanUtils;
-import com.tianji.common.utils.CollUtils;
-import com.tianji.common.utils.UserContext;
+import com.tianji.common.utils.*;
 import com.tianji.learning.domain.po.LearningLesson;
+import com.tianji.learning.domain.po.LearningRecord;
 import com.tianji.learning.domain.vo.LearningLessonVO;
+import com.tianji.learning.domain.vo.LearningPlanPageVO;
+import com.tianji.learning.domain.vo.LearningPlanVO;
 import com.tianji.learning.enums.LessonStatus;
+import com.tianji.learning.enums.PlanStatus;
 import com.tianji.learning.mapper.LearningLessonMapper;
+import com.tianji.learning.mapper.LearningRecordMapper;
 import com.tianji.learning.service.ILearningLessonService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -43,6 +48,7 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class LearningLessonServiceImpl extends ServiceImpl<LearningLessonMapper, LearningLesson> implements ILearningLessonService {
 
+    private final LearningRecordMapper recordMapper;
     private final CourseClient courseClient;
     private final CatalogueClient catalogueClient;
 
@@ -221,5 +227,89 @@ public class LearningLessonServiceImpl extends ServiceImpl<LearningLessonMapper,
             return null;
         }
         return BeanUtils.copyBean(lesson, LearningLessonVO.class);
+    }
+
+    @Override
+    public void createLearningPlan(Long courseId, Integer freq) {
+        // 获取课程表数据
+        Long userId = UserContext.getUser();
+        LearningLesson lesson = lambdaQuery()
+                .eq(LearningLesson::getUserId, userId)
+                .eq(LearningLesson::getCourseId, courseId)
+                .one();
+        AssertUtils.isNotNull(lesson, "课程信息不存在");
+        LearningLesson update = new LearningLesson();
+        update.setWeekFreq(freq);
+        update.setId(lesson.getId());
+        if (lesson.getPlanStatus() == PlanStatus.NO_PLAN) {
+            update.setPlanStatus(PlanStatus.PLAN_RUNNING);
+        }
+        updateById(update);
+    }
+
+    @Override
+    public LearningPlanPageVO queryMyPlans(PageQuery query) {
+        LearningPlanPageVO vo = new LearningPlanPageVO();
+        Long userId = UserContext.getUser();
+        LocalDate now = LocalDate.now();
+        LocalDateTime weekBeginTime = DateUtils.getWeekBeginTime(now);
+        LocalDateTime weekEndTime = DateUtils.getWeekEndTime(now);
+        // 本周总的已学习小节数量
+        // 方式一
+        Integer weekFinished = recordMapper.selectCount(new LambdaQueryWrapper<LearningRecord>()
+                .eq(LearningRecord::getUserId, userId)
+                .eq(LearningRecord::getFinished, true)
+                .gt(LearningRecord::getFinishTime, weekBeginTime)
+                .lt(LearningRecord::getFinishTime, weekEndTime)
+        );
+        // 方式二
+//        List<LearningRecord> learnedRecords = recordMapper.selectList(new QueryWrapper<LearningRecord>().lambda()
+//                .eq(LearningRecord::getUserId, userId)
+//                .eq(LearningRecord::getFinished, true)
+//                .gt(LearningRecord::getFinishTime, weekBeginTime)
+//                .lt(LearningRecord::getFinishTime, weekEndTime)
+//        );
+        // 相当于  List<IdAndNumDTO> list = recordMapper.countLearnedSections(userId, weekBeginTime, weekEndTime);
+//        Map<Long, Long> countMap = learnedRecords.stream()
+//                .collect(Collectors.groupingBy(LearningRecord::getLessonId, Collectors.counting()));
+
+        vo.setWeekFinished(weekFinished);
+        // 本周总的计划学习小节数量
+        Integer weekTotalPlan = getBaseMapper().queryTotalPlan(userId);
+        vo.setWeekTotalPlan(weekTotalPlan);
+        // TODO 本周学习积分
+        // 查询分页数据
+        Page<LearningLesson> page = lambdaQuery()
+                .eq(LearningLesson::getUserId, userId)
+                .eq(LearningLesson::getPlanStatus, PlanStatus.PLAN_RUNNING)
+                .in(LearningLesson::getStatus, LessonStatus.LEARNING, LessonStatus.NOT_BEGIN)
+                .page(query.toMpPage("latest_learn_time", false));
+        List<LearningLesson> records = page.getRecords();
+        if (CollUtils.isEmpty(records)) {
+            LearningPlanPageVO learningPlanPageVO = new LearningPlanPageVO();
+            learningPlanPageVO.setTotal(0L);
+            learningPlanPageVO.setPages(0L);
+            learningPlanPageVO.setList(CollUtils.emptyList());
+            return learningPlanPageVO;
+        }
+        // 查询课表对应的课程信息
+        Map<Long, CourseSimpleInfoDTO> cMap = queryCourseSimpleInfoList(records);
+        // 统计每一个课程本周已学习小节数量
+        // 课程id 和 完成数量
+        List<IdAndNumDTO> list = recordMapper.countLearnedSections(userId, weekBeginTime, weekEndTime);
+        Map<Long, Integer> countMap = IdAndNumDTO.toMap(list);
+        List planVOs = new ArrayList<>(records.size());
+        for (LearningLesson record : records) {
+            LearningPlanVO planVO = BeanUtils.copyBean(record, LearningPlanVO.class);
+            CourseSimpleInfoDTO cInfo = cMap.get(record.getCourseId());
+            if (cInfo != null) {
+                planVO.setSections(cInfo.getSectionNum());
+                planVO.setCourseName(cInfo.getName());
+            }
+            // 每个课程的本周已学习小节数量
+            planVO.setWeekLearnedSections(countMap.getOrDefault(record.getId(), 0));
+            planVOs.add(planVO);
+        }
+        return vo.pageInfo(page.getTotal(), page.getPages(), planVOs);
     }
 }

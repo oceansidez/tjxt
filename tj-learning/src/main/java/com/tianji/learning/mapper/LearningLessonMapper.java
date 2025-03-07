@@ -13,4 +13,11 @@ import com.baomidou.mybatisplus.core.mapper.BaseMapper;
  */
 public interface LearningLessonMapper extends BaseMapper<LearningLesson> {
 
+    /**
+     * 查询计划全部课程的周计划数
+     *
+     * @param userId
+     * @return
+     */
+    Integer queryTotalPlan(Long userId);
 }
