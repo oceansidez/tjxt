@@ -17,6 +17,7 @@ import com.tianji.learning.enums.SectionType;
 import com.tianji.learning.mapper.LearningRecordMapper;
 import com.tianji.learning.service.ILearningLessonService;
 import com.tianji.learning.service.ILearningRecordService;
+import com.tianji.learning.utils.LearningRecordDelayTaskHandler;
 import lombok.AllArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -38,6 +39,8 @@ public class LearningRecordServiceImpl extends ServiceImpl<LearningRecordMapper,
     private final ILearningLessonService lessonService;
 
     private final CourseClient courseClient;
+
+    private final LearningRecordDelayTaskHandler taskHandler;
 
     /**
      * 查询指定课程的学习记录
@@ -83,8 +86,14 @@ public class LearningRecordServiceImpl extends ServiceImpl<LearningRecordMapper,
             // 处理考试
             finished = handleExamRecord(userId, formDTO);
         }
+        // 优化添加============
+        // 没有新学完的小节，无需更新课表中的学习进度
+        if (!finished) {
+            return;
+        }
+        //===================
         // 处理课表数据
-        handleLearningLessonsChanges(formDTO, finished);
+        handleLearningLessonsChanges(formDTO);
     }
 
     private boolean handleVideoRecord(Long userId, LearningRecordFormDTO formDTO) {
@@ -106,16 +115,29 @@ public class LearningRecordServiceImpl extends ServiceImpl<LearningRecordMapper,
         }
         // 判断是否第一次看完,第一次看完才更新完成状态
         boolean isFinish = !oldRecord.getFinished() && formDTO.getMoment() > (formDTO.getDuration() >>> 1);
+        if (!isFinish) {
+            LearningRecord record = new LearningRecord();
+            record.setLessonId(formDTO.getLessonId());
+            record.setSectionId(formDTO.getSectionId());
+            record.setMoment(formDTO.getMoment());
+            record.setId(oldRecord.getId());
+            record.setFinished(oldRecord.getFinished());
+            // 添加到缓存和延迟队列
+            taskHandler.addLearningRecordTask(record);
+            return false;
+        }
         boolean success = lambdaUpdate()
                 .set(LearningRecord::getMoment, formDTO.getMoment())
-                .set(isFinish, LearningRecord::getFinished, true)
-                .set(isFinish, LearningRecord::getFinishTime, formDTO.getCommitTime())
+                .set(LearningRecord::getFinished, true)
+                .set(LearningRecord::getFinishTime, formDTO.getCommitTime())
                 .eq(LearningRecord::getId, oldRecord.getId())
                 .update();
         if (!success) {
             throw new DbException("更新学习记录失败！");
         }
-        return isFinish;
+        // 清空缓存
+        taskHandler.cleanRecordCache(formDTO.getLessonId(), formDTO.getSectionId());
+        return true;
     }
 
     private boolean handleExamRecord(Long userId, LearningRecordFormDTO formDTO) {
@@ -139,24 +161,22 @@ public class LearningRecordServiceImpl extends ServiceImpl<LearningRecordMapper,
         return true;
     }
 
-    private void handleLearningLessonsChanges(LearningRecordFormDTO formDTO, boolean finished) {
+    private void handleLearningLessonsChanges(LearningRecordFormDTO formDTO) {
         // 查询课表
         LearningLesson lesson = lessonService.getById(formDTO.getLessonId());
         if (lesson == null) {
             throw new BizIllegalException("课程不存在，无法更新数据！");
         }
         boolean allFinish = false;
-        if (finished) {
-            // 判断是否完成所有小结
-            CourseFullInfoDTO cInfo = courseClient.getCourseInfoById(lesson.getCourseId(), false, false);
-            if (cInfo == null) {
-                throw new BizIllegalException("课程不存在，无法更新数据！");
-            }
-            // 比较课程是否全部学完：已学习小节 >= 课程总小节
-            allFinish = lesson.getLearnedSections() + 1 >= cInfo.getSectionNum();
+        // 判断是否完成所有小结
+        CourseFullInfoDTO cInfo = courseClient.getCourseInfoById(lesson.getCourseId(), false, false);
+        if (cInfo == null) {
+            throw new BizIllegalException("课程不存在，无法更新数据！");
         }
+        // 比较课程是否全部学完：已学习小节 >= 课程总小节
+        allFinish = lesson.getLearnedSections() + 1 >= cInfo.getSectionNum();
         lessonService.lambdaUpdate()
-                .setSql(finished, "learned_sections = learned_sections + 1")
+                .setSql("learned_sections = learned_sections + 1")
                 .set(allFinish, LearningLesson::getStatus, allFinish ? LessonStatus.FINISHED : LessonStatus.LEARNING)
                 .set(LearningLesson::getLatestSectionId, formDTO.getLessonId())
                 .set(LearningLesson::getLatestLearnTime, formDTO.getCommitTime())
