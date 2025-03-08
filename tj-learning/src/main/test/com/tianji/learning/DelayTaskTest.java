@@ -24,4 +24,7 @@ class DelayTaskTest {
             log.info("开始执行延迟任务：{}", task.getData());
         }
     }
+
+
+
 }
