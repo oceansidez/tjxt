@@ -26,7 +26,7 @@ public class LessonChangeListener {
      * @param order
      */
     @RabbitListener(bindings = @QueueBinding(
-            value = @Queue(value = "learning.lesson.pay.queue", durable = "ture"),
+            value = @Queue(value = "learning.lesson.pay.queue", durable = "true"),
             exchange = @Exchange(value = MqConstants.Exchange.ORDER_EXCHANGE, type = ExchangeTypes.TOPIC),
             key = MqConstants.Key.ORDER_PAY_KEY
     ))

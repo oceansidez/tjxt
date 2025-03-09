@@ -2,6 +2,7 @@ package com.tianji.learning.service.impl;
 
 import com.baomidou.mybatisplus.core.metadata.OrderItem;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.tianji.api.client.remark.RemarkClient;
 import com.tianji.api.client.user.UserClient;
 import com.tianji.api.dto.user.UserDTO;
 import com.tianji.common.constants.Constant;
@@ -43,10 +44,12 @@ public class InteractionReplyServiceImpl extends ServiceImpl<InteractionReplyMap
 
     private final IInteractionQuestionService questionService;
     private final UserClient userClient;
+    private final RemarkClient remarkClient;
 
-    public InteractionReplyServiceImpl(@Lazy IInteractionQuestionService questionService, UserClient userClient) {
+    public InteractionReplyServiceImpl(@Lazy IInteractionQuestionService questionService, UserClient userClient, RemarkClient remarkClient) {
         this.questionService = questionService;
         this.userClient = userClient;
+        this.remarkClient = remarkClient;
     }
 
     @Override
@@ -85,7 +88,8 @@ public class InteractionReplyServiceImpl extends ServiceImpl<InteractionReplyMap
         // 分页查询
         Page<InteractionReply> page = lambdaQuery()
                 .eq(isQueryAnswer, InteractionReply::getQuestionId, questionId)
-                .eq(!isQueryAnswer, InteractionReply::getAnswerId, answerId)
+//                .eq(!isQueryAnswer, InteractionReply::getAnswerId, answerId) 或者下面的任何时候都查询
+                .eq(InteractionReply::getAnswerId, isQueryAnswer ? 0L : answerId)
                 .eq(!forAdmin, InteractionReply::getHidden, false)
                 .page(query.toMpPage(// 先根据点赞数排序，点赞数相同，再按照创建时间排序
                         new OrderItem(Constant.DATA_FIELD_NAME_LIKED_TIME, false),
@@ -97,22 +101,26 @@ public class InteractionReplyServiceImpl extends ServiceImpl<InteractionReplyMap
         }
         // 数据处理，需要查询：提问者信息、回复目标信息、当前用户是否点赞
         Set<Long> userIds = new HashSet<>();
+        Set<Long> answerIds = new HashSet<>();
         Set<Long> targetReplyIds = new HashSet<>();
         for (InteractionReply r : records) {
             if (!r.getAnonymity() || forAdmin) {
                 userIds.add(r.getUserId());
             }
             targetReplyIds.add(r.getTargetReplyId());
+            answerIds.add(r.getId());
         }
         // 查询目标回复，如果目标回复不是匿名，则需要查询出目标回复的用户信息
         targetReplyIds.remove(0L);
         targetReplyIds.remove(null);
+        Map<Long, InteractionReply> targetReplieMap = new HashMap<>(targetReplyIds.size());
         if (targetReplyIds.size() > 0) {
             List<InteractionReply> targetReplies = listByIds(targetReplyIds);
             List<Long> targetUserIds = targetReplies.stream()
                     .filter(interactionReply -> !interactionReply.getAnonymity() || forAdmin)
                     .map(InteractionReply::getUserId)
                     .collect(Collectors.toList());
+            targetReplieMap = targetReplies.stream().collect(Collectors.toMap(InteractionReply::getId, c -> c));
             userIds.addAll(targetUserIds);
         }
         // 查询用户
@@ -121,7 +129,8 @@ public class InteractionReplyServiceImpl extends ServiceImpl<InteractionReplyMap
             List<UserDTO> users = userClient.queryUserByIds(userIds);
             userMap = users.stream().collect(Collectors.toMap(UserDTO::getId, u -> u));
         }
-        // todo 查询用户点赞状态
+        // 查询用户点赞状态
+        Set<Long> bizLiked = remarkClient.isBizLiked(answerIds);
         List<ReplyVO> list = new ArrayList<>(records.size());
         for (InteractionReply r : records) {
             ReplyVO v = BeanUtils.toBean(r, ReplyVO.class);
@@ -135,14 +144,22 @@ public class InteractionReplyServiceImpl extends ServiceImpl<InteractionReplyMap
                     v.setUserType(userDTO.getType());
                 }
             }
-            // 如果存在评论的目标，则需要设置目标用户信息
-            if (r.getTargetReplyId() != null) {
+            // 为了获取回答目标是否是匿名，匿名则不设置
+
+            // 如果存在评论的目标，且为目标不为匿名则需要设置目标用户信息
+            if (r.getTargetReplyId() != null || forAdmin) {
+                InteractionReply targetReplie = targetReplieMap.get(r.getTargetReplyId());
                 UserDTO targetUser = userMap.get(r.getTargetUserId());
-                if (targetUser != null) {
+                if (targetUser != null && !targetReplie.getAnonymity()) {
                     v.setTargetUserName(targetUser.getName());
                 }
+                // 管理查看设置 匿名标识
+                if (targetUser != null && forAdmin && targetReplie.getAnonymity()) {
+                    v.setTargetUserName(targetUser.getName() + "[匿名]");
+                }
             }
-            // todo 点赞状态
+            // 点赞状态
+            v.setLiked(bizLiked.contains(r.getId()));
         }
         return PageDTO.of(page, list);
     }
@@ -173,7 +190,41 @@ public class InteractionReplyServiceImpl extends ServiceImpl<InteractionReplyMap
 
     @Override
     public ReplyVO queryReplyById(Long id) {
-
-        return null;
+        InteractionReply r = getById(id);
+        // 获取用户 id
+        Set<Long> userIds = new HashSet<>();
+        userIds.add(r.getUserId());
+        // 查询评论目标，如果评论目标不是匿名，则需要查询出目标回复的用户id
+        if (r.getTargetReplyId() != null && r.getTargetReplyId() != 0L) {
+            InteractionReply target = getById(r.getTargetReplyId());
+            if (!target.getAnonymity()) {
+                userIds.add(target.getUserId());
+            }
+        }
+        // 查询用户详细
+        Map<Long, UserDTO> userMap = new HashMap<>(userIds.size());
+        if (userIds.size() > 0) {
+            List<UserDTO> users = userClient.queryUserByIds(userIds);
+            userMap = users.stream().collect(Collectors.toMap(UserDTO::getId, u -> u));
+        }
+        // 查询用户点赞状态
+        Set<Long> bizLiked = remarkClient.isBizLiked(CollUtils.singletonSet(id));
+        // 处理VO
+        ReplyVO v = BeanUtils.toBean(r, ReplyVO.class);
+        // 回复人信息
+        UserDTO userDTO = userMap.get(r.getUserId());
+        if (userDTO != null) {
+            v.setUserIcon(userDTO.getIcon());
+            v.setUserName(r.getAnonymity() ? userDTO.getName() + "[匿名]" : userDTO.getName());
+            v.setUserType(userDTO.getType());
+        }
+        // 目标用户
+        UserDTO targetUser = userMap.get(r.getTargetUserId());
+        if (targetUser != null) {
+            v.setTargetUserName(targetUser.getName());
+        }
+        // 点赞状态
+        v.setLiked(bizLiked.contains(id));
+        return v;
     }
 }
