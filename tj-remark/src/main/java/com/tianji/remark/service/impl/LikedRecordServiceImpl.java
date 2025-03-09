@@ -29,7 +29,7 @@ import static com.tianji.common.constants.MqConstants.Key.LIKED_TIMES_KEY_TEMPLA
  * @author author
  * @since 2025-03-08
  */
-@Service
+//@Service 使用redis的方式
 @RequiredArgsConstructor
 public class LikedRecordServiceImpl extends ServiceImpl<LikedRecordMapper, LikedRecord> implements ILikedRecordService {
     private final RabbitMqHelper mqHelper;
@@ -63,6 +63,11 @@ public class LikedRecordServiceImpl extends ServiceImpl<LikedRecordMapper, Liked
         return records.stream()
                 .map(LikedRecord::getBizId)
                 .collect(Collectors.toSet());
+    }
+
+    @Override
+    public void readLikedTimesAndSendMessage(String bizType, int maxBizSize) {
+
     }
 
     private boolean like(LikeRecordFormDTO recordDTO) {
