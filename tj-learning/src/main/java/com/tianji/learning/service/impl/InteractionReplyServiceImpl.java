@@ -5,7 +5,9 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.tianji.api.client.remark.RemarkClient;
 import com.tianji.api.client.user.UserClient;
 import com.tianji.api.dto.user.UserDTO;
+import com.tianji.common.autoconfigure.mq.RabbitMqHelper;
 import com.tianji.common.constants.Constant;
+import com.tianji.common.constants.MqConstants;
 import com.tianji.common.domain.dto.PageDTO;
 import com.tianji.common.exceptions.BadRequestException;
 import com.tianji.common.utils.BeanUtils;
@@ -39,17 +41,21 @@ import static com.tianji.common.constants.Constant.DATA_FIELD_NAME_CREATE_TIME;
  * @since 2025-03-08
  */
 @Service
-
 public class InteractionReplyServiceImpl extends ServiceImpl<InteractionReplyMapper, InteractionReply> implements IInteractionReplyService {
 
     private final IInteractionQuestionService questionService;
     private final UserClient userClient;
     private final RemarkClient remarkClient;
+    private final RabbitMqHelper mqHelper;
 
-    public InteractionReplyServiceImpl(@Lazy IInteractionQuestionService questionService, UserClient userClient, RemarkClient remarkClient) {
+    public InteractionReplyServiceImpl(@Lazy IInteractionQuestionService questionService,
+                                       UserClient userClient,
+                                       RemarkClient remarkClient,
+                                       RabbitMqHelper mqHelper) {
         this.questionService = questionService;
         this.userClient = userClient;
         this.remarkClient = remarkClient;
+        this.mqHelper = mqHelper;
     }
 
     @Override
@@ -59,21 +65,30 @@ public class InteractionReplyServiceImpl extends ServiceImpl<InteractionReplyMap
         InteractionReply reply = BeanUtils.copyBean(replyDTO, InteractionReply.class);
         reply.setUserId(userId);
         save(reply);
-        if (replyDTO.getAnswerId() != null) {
+        // 判断当前回复的类型是否是回答
+        boolean isAnswer = replyDTO.getAnswerId() == null;
+        if (!isAnswer) {
             // 是评论，则需要更新上级回答的评论数量
             lambdaUpdate()
                     .setSql("reply_times = reply_times + 1")
                     .eq(InteractionReply::getId, replyDTO.getAnswerId())
                     .update();
         }
-        // 更新问题中的最新回答等信息
+        // 尝试更新问题表中的状态、 最近一次回答、回答数量
         questionService.lambdaUpdate()
-                .set(replyDTO.getAnswerId() == null, InteractionQuestion::getLatestAnswerId, reply.getId())
-                .setSql("answer_times = answer_times + 1")
+                .set(isAnswer, InteractionQuestion::getLatestAnswerId, reply.getId())
+                .setSql(isAnswer, "answer_times = answer_times + 1")
                 .set(replyDTO.getIsStudent(), InteractionQuestion::getStatus, QuestionStatus.UN_CHECK)
                 .eq(InteractionQuestion::getId, replyDTO.getQuestionId())
                 .update();
-        // todo 添加积分
+        // 添加积分
+        if (replyDTO.getIsStudent()) {
+            // 学生才需要累加积分
+            mqHelper.send(
+                    MqConstants.Exchange.LEARNING_EXCHANGE,
+                    MqConstants.Key.WRITE_REPLY,
+                    userId);
+        }
     }
 
     @Override
