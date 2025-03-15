@@ -52,6 +52,11 @@ public class CouponController {
         return couponService.queryCouponById(id);
     }
 
+    @ApiOperation("修改优惠券")
+    @PutMapping("/{id}")
+    public void updateCoupon(@RequestBody CouponFormDTO dto) {
+        couponService.updateCoupon(dto);
+    }
 
     @ApiOperation("发放优惠券接口")
     @PutMapping("/{id}/issue")

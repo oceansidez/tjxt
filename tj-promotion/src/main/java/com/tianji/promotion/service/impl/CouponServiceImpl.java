@@ -1,17 +1,17 @@
 package com.tianji.promotion.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.tianji.api.cache.CategoryCache;
 import com.tianji.common.domain.dto.PageDTO;
 import com.tianji.common.exceptions.BadRequestException;
 import com.tianji.common.exceptions.BizIllegalException;
-import com.tianji.common.utils.BeanUtils;
-import com.tianji.common.utils.CollUtils;
-import com.tianji.common.utils.StringUtils;
+import com.tianji.common.utils.*;
 import com.tianji.promotion.constants.PromotionConstants;
 import com.tianji.promotion.domain.po.Coupon;
 import com.tianji.promotion.domain.po.CouponScope;
+import com.tianji.promotion.domain.po.UserCoupon;
 import com.tianji.promotion.domain.query.CouponQuery;
 import com.tianji.promotion.domain.vo.CouponDetailVO;
 import com.tianji.promotion.domain.vo.CouponPageVO;
@@ -21,18 +21,22 @@ import com.tianji.promotion.dto.CouponFormDTO;
 import com.tianji.promotion.dto.CouponIssueFormDTO;
 import com.tianji.promotion.enums.CouponStatus;
 import com.tianji.promotion.enums.ObtainType;
+import com.tianji.promotion.enums.UserCouponStatus;
 import com.tianji.promotion.mapper.CouponMapper;
 import com.tianji.promotion.service.ICouponScopeService;
 import com.tianji.promotion.service.ICouponService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.tianji.promotion.service.IExchangeCodeService;
+import com.tianji.promotion.service.IUserCouponService;
 import lombok.AllArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -53,6 +57,7 @@ public class CouponServiceImpl extends ServiceImpl<CouponMapper, Coupon> impleme
     private final IExchangeCodeService codeService;
     private final CategoryCache categoryCache;
     private final StringRedisTemplate redisTemplate;
+    private final IUserCouponService userCouponService;
 
     @Override
     @Transactional
@@ -72,8 +77,11 @@ public class CouponServiceImpl extends ServiceImpl<CouponMapper, Coupon> impleme
         }
         // 2.1.转换PO
         List<CouponScope> list = scopes.stream()
-                .map(bizId -> new CouponScope().setBizId(bizId).setCouponId(couponId))
-                .collect(Collectors.toList());
+                .map(bizId -> new CouponScope()
+                        .setBizId(bizId)
+                        .setCouponId(couponId)
+                        .setType(1)
+                ).collect(Collectors.toList());
         // 2.2.保存
         scopeService.saveBatch(list);
     }
@@ -184,7 +192,43 @@ public class CouponServiceImpl extends ServiceImpl<CouponMapper, Coupon> impleme
 
     @Override
     public List<CouponVO> queryIssuingCoupons() {
-        return null;
+        LocalDateTime now = LocalDateTime.now();
+        // 1.查询发放中的优惠券列表
+        List<Coupon> coupons = lambdaQuery()
+                .eq(Coupon::getStatus, ISSUING)
+                .eq(Coupon::getObtainWay, ObtainType.PUBLIC)
+                .le(Coupon::getIssueBeginTime,now)
+                .ge(Coupon::getIssueEndTime,now)
+                .list();
+        if (CollUtils.isEmpty(coupons)) {
+            return CollUtils.emptyList();
+        }
+        // 2.统计当前用户已经领取的优惠券的信息
+        List<Long> couponIds = coupons.stream().map(Coupon::getId).collect(Collectors.toList());
+        // 2.1.查询当前用户已经领取的优惠券的数据
+        List<UserCoupon> userCoupons = userCouponService.lambdaQuery()
+                .eq(UserCoupon::getUserId, UserContext.getUser())
+                .in(UserCoupon::getCouponId, couponIds)
+                .list();
+        // 2.2.统计当前用户对优惠券的已经领取数量
+        Map<Long, Long> issuedMap = userCoupons.stream()
+                .collect(Collectors.groupingBy(UserCoupon::getCouponId, Collectors.counting()));
+        // 2.3.统计当前用户对优惠券的已经领取并且未使用的数量
+        Map<Long, Long> unusedMap = userCoupons.stream().filter(uc -> uc.getStatus() == UserCouponStatus.UNUSED)
+                .collect(Collectors.groupingBy(UserCoupon::getCouponId, Collectors.counting()));
+        // 3.封装VO结果
+        List<CouponVO> list = new ArrayList<>(coupons.size());
+        for (Coupon c : coupons) {
+            // 3.1.拷贝PO属性到VO
+            CouponVO vo = BeanUtils.copyBean(c, CouponVO.class);
+            list.add(vo);
+            // 3.2.是否可以领取：已经被领取的数量 < 优惠券总数量 && 当前用户已经领取的数量 < 每人限领数量
+            vo.setAvailable(c.getIssueNum() < c.getTotalNum()
+                    && issuedMap.getOrDefault(c.getId(), 0L) < c.getUserLimit());
+            // 3.3.是否可以使用：当前用户已经领取并且未使用的优惠券数量 > 0
+            vo.setReceived(unusedMap.getOrDefault(c.getId(), 0L) > 0);
+        }
+        return list;
     }
 
     @Override
@@ -203,9 +247,36 @@ public class CouponServiceImpl extends ServiceImpl<CouponMapper, Coupon> impleme
             throw new BadRequestException("优惠券不存在或者优惠券正在使用中");
         }
         // 3.删除优惠券对应限定范围
-        if(!coupon.getSpecific()){
+        if (!coupon.getSpecific()) {
             return;
         }
         scopeService.remove(new LambdaQueryWrapper<CouponScope>().eq(CouponScope::getCouponId, id));
     }
+
+    @Override
+    @Transactional
+    public void updateCoupon(CouponFormDTO dto) {
+        Coupon coupon = getById(dto.getId());
+        if (coupon == null || coupon.getStatus() == ISSUING) {
+            throw new BadRequestException("优惠券不存在或者优惠券正在发放中");
+        }
+        Coupon couponUpdate = BeanUtils.copyBean(dto, Coupon.class);
+        updateById(couponUpdate);
+        if (!dto.getSpecific()) {
+            return;
+        }
+        List<Long> scopes = dto.getScopes();
+        if (CollUtils.isEmpty(scopes)) {
+            return;
+        }
+        // 2.删除优惠券
+        scopeService.remove(Wrappers.<CouponScope>lambdaQuery()
+                .eq(CouponScope::getCouponId, coupon.getId()));
+        List<CouponScope> scopeList = scopes.stream()
+                .map(scopeId -> new CouponScope()
+                        .setCouponId(coupon.getId()).setBizId(scopeId).setType(1))
+                .collect(Collectors.toList());
+        scopeService.saveBatch(scopeList);
+    }
+
 }
