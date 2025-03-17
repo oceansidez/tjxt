@@ -35,6 +35,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -134,11 +135,28 @@ public class CouponServiceImpl extends ServiceImpl<CouponMapper, Coupon> impleme
         }
         // 4.3.写入数据库
         updateById(c);
+        // 5.添加缓存，前提是立刻发放的
+        if (isBegin) {
+            coupon.setIssueBeginTime(c.getIssueBeginTime());
+            coupon.setIssueEndTime(c.getIssueEndTime());
+            cacheCouponInfo(coupon);
+        }
         // 5.判断是否需要生成兑换码，优惠券类型必须是兑换码，优惠券状态必须是待发放
         if (coupon.getObtainWay() == ObtainType.ISSUE && coupon.getStatus() == CouponStatus.DRAFT) {
             coupon.setIssueEndTime(c.getIssueEndTime());
             codeService.asyncGenerateCode(coupon);
         }
+    }
+
+    private void cacheCouponInfo(Coupon coupon) {
+        // 1.组织数据
+        Map<String, String> map = new HashMap<>(4);
+        map.put("issueBeginTime", String.valueOf(DateUtils.toEpochMilli(coupon.getIssueBeginTime())));
+        map.put("issueEndTime", String.valueOf(DateUtils.toEpochMilli(coupon.getIssueEndTime())));
+        map.put("totalNum", String.valueOf(coupon.getTotalNum()));
+        map.put("userLimit", String.valueOf(coupon.getUserLimit()));
+        // 2.写缓存
+        redisTemplate.opsForHash().putAll(PromotionConstants.COUPON_CACHE_KEY_PREFIX + coupon.getId(), map);
     }
 
     @Override
@@ -187,7 +205,8 @@ public class CouponServiceImpl extends ServiceImpl<CouponMapper, Coupon> impleme
             // 可能是重复更新，结束
             log.error("重复暂停优惠券");
         }
-        // 4.todo 删除缓存
+        // 4.删除缓存
+        redisTemplate.delete(PromotionConstants.COUPON_CACHE_KEY_PREFIX + id);
     }
 
     @Override
@@ -197,8 +216,8 @@ public class CouponServiceImpl extends ServiceImpl<CouponMapper, Coupon> impleme
         List<Coupon> coupons = lambdaQuery()
                 .eq(Coupon::getStatus, ISSUING)
                 .eq(Coupon::getObtainWay, ObtainType.PUBLIC)
-                .le(Coupon::getIssueBeginTime,now)
-                .ge(Coupon::getIssueEndTime,now)
+                .le(Coupon::getIssueBeginTime, now)
+                .ge(Coupon::getIssueEndTime, now)
                 .list();
         if (CollUtils.isEmpty(coupons)) {
             return CollUtils.emptyList();

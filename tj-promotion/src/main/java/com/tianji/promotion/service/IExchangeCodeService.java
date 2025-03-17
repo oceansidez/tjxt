@@ -17,4 +17,6 @@ public interface IExchangeCodeService extends IService<ExchangeCode> {
     void asyncGenerateCode(Coupon coupon);
 
     boolean updateExchangeMark(long serialNum, boolean b);
+
+    Long exchangeTargetId(long serialNum);
 }

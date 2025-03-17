@@ -1,11 +1,13 @@
 package com.tianji.promotion.service;
 
-import com.tianji.common.domain.dto.PageDTO;
-import com.tianji.promotion.domain.po.Coupon;
-import com.tianji.promotion.domain.po.UserCoupon;
 import com.baomidou.mybatisplus.extension.service.IService;
+import com.tianji.common.domain.dto.PageDTO;
+import com.tianji.promotion.domain.po.UserCoupon;
 import com.tianji.promotion.domain.query.UserCouponQuery;
 import com.tianji.promotion.domain.vo.CouponVO;
+import com.tianji.promotion.dto.UserCouponDTO;
+
+import java.util.List;
 
 /**
  * <p>
@@ -13,15 +15,19 @@ import com.tianji.promotion.domain.vo.CouponVO;
  * </p>
  *
  * @author author
- * @since 2025-03-14
  */
 public interface IUserCouponService extends IService<UserCoupon> {
-
     void receiveCoupon(Long couponId);
+
+    void checkAndCreateUserCoupon(UserCouponDTO uc);
 
     void exchangeCoupon(String code);
 
-    void checkAndCreateUserCoupon(Coupon coupon, Long userId, Long serialNum);
-
     PageDTO<CouponVO> queryMyCouponPage(UserCouponQuery query);
+
+    void writeOffCoupon(List<Long> userCouponIds);
+
+    void refundCoupon(List<Long> userCouponIds);
+
+    List<String> queryDiscountRules(List<Long> userCouponIds);
 }

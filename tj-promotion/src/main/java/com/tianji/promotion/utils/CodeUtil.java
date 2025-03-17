@@ -39,10 +39,14 @@ public class CodeUtil {
      * 异或密钥表，用于最后的数据混淆
      */
     private final static long[] XOR_TABLE = {
-            61261925471L, 61261925523L, 58169127203L, 64169927267L,
-            64169927199L, 61261925629L, 58169127227L, 64169927363L,
-            59169127063L, 64169927359L, 58169127291L, 61261925739L,
-            59169127133L, 55139281911L, 56169127077L, 59169127167L
+            45139281907L, 61261925523L, 58169127203L, 27031786219L,
+            64169927199L, 46169126943L, 32731286209L, 52082227349L,
+            59169127063L, 36169126987L, 52082200939L, 61261925739L,
+            32731286563L, 27031786427L, 56169127077L, 34111865001L,
+            52082216763L, 61261925663L, 56169127113L, 45139282119L,
+            32731286479L, 64169927233L, 41390251661L, 59169127121L,
+            64169927321L, 55139282179L, 34111864881L, 46169127031L,
+            58169127221L, 61261925523L, 36169126943L, 64169927363L,
     };
     /**
      * fresh值的偏移位数
@@ -103,9 +107,8 @@ public class CodeUtil {
         long payload = fresh << FRESH_BIT_OFFSET | serialNum;
         // 3.计算验证码
         long checkCode = calcCheckCode(payload, (int) fresh);
-        System.out.println("checkCode = " + checkCode);
         // 4.payload做大质数异或运算，混淆数据
-        payload ^= XOR_TABLE[(int) (checkCode & FRESH_MASK)];
+        payload ^= XOR_TABLE[(int) (checkCode & 0b11111)];
         // 5.拼接兑换码明文: 校验码（14位） + payload（36位）
         long code = checkCode << CHECK_CODE_BIT_OFFSET | payload;
         // 6.转码
@@ -137,7 +140,7 @@ public class CodeUtil {
         // 3.获取高14位，校验码
         int checkCode = (int) (num >>> CHECK_CODE_BIT_OFFSET);
         // 4.载荷异或大质数，解析出原来的payload
-        payload ^= XOR_TABLE[(checkCode & FRESH_MASK)];
+        payload ^= XOR_TABLE[(checkCode & 0b11111)];
         // 5.获取高4位，fresh
         int fresh = (int) (payload >>> FRESH_BIT_OFFSET & FRESH_MASK);
         // 6.验证格式：
