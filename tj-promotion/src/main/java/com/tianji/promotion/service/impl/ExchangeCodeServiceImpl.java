@@ -1,16 +1,14 @@
 package com.tianji.promotion.service.impl;
 
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.tianji.common.utils.CollUtils;
 import com.tianji.promotion.constants.PromotionConstants;
 import com.tianji.promotion.domain.po.Coupon;
 import com.tianji.promotion.domain.po.ExchangeCode;
 import com.tianji.promotion.mapper.ExchangeCodeMapper;
 import com.tianji.promotion.service.IExchangeCodeService;
-import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.tianji.promotion.utils.CodeUtil;
 import lombok.AllArgsConstructor;
-import org.springframework.data.redis.connection.BitFieldSubCommands;
-import org.springframework.data.redis.core.BoundValueOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.scheduling.annotation.Async;

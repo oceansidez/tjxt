@@ -66,7 +66,7 @@ public class DiscountServiceImpl implements IDiscountService {
         for (Coupon c : availableCoupons) {
             solutions.add(List.of(c));
         }
-        // 4.计算方案的优惠明细
+        // 4.计算方案的优惠明细 异步
         List<CouponDiscountDTO> list = Collections.synchronizedList(new ArrayList<>(solutions.size()));
         // 4.1.定义闭锁
         CountDownLatch latch = new CountDownLatch(solutions.size());
@@ -76,14 +76,15 @@ public class DiscountServiceImpl implements IDiscountService {
                     .supplyAsync(
                             () -> calculateSolutionDiscount(availableCouponMap, orderCourses, solution),
                             discountSolutionExecutor
-                    ).thenAccept(dto -> {
-                // 4.3.提交任务结果
-                list.add(dto);
-                latch.countDown();
-            });
+                    ).thenAccept(dto -> { // 获取任务的返回值但是本任务不返回
+                        // 4.3.提交任务结果
+                        list.add(dto);
+                        latch.countDown();
+                    });
         }
         // 4.4.等待运算结束
         try {
+            // 主线程等待其他线程完成
             latch.await(1, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             log.error("优惠方案计算被中断，{}", e.getMessage());
@@ -109,6 +110,9 @@ public class DiscountServiceImpl implements IDiscountService {
         return calculateSolutionDiscount(availableCouponMap, orderCouponDTO.getCourseList(), coupons);
     }
 
+    // 通过2个map求交集获取最优解
+    // - 用券相同时，优惠金额最高的方案
+    // - 优惠金额相同时，用券最少的方案
     private List<CouponDiscountDTO> findBestSolution(List<CouponDiscountDTO> list) {
         // 1.准备Map记录最优解
         Map<String, CouponDiscountDTO> moreDiscountMap = new HashMap<>();
@@ -118,7 +122,7 @@ public class DiscountServiceImpl implements IDiscountService {
             // 2.1.计算当前方案的id组合
             String ids = solution.getIds().stream()
                     .sorted(Long::compare).map(String::valueOf).collect(Collectors.joining(","));
-            // 2.2.比较用券相同时，优惠金额是否最大
+            // 2.2.比较用券相同时，优惠金额是否最大  当前优惠金额 < 旧的方案金额 即 旧的方案金额 >= 当前方案金额
             CouponDiscountDTO best = moreDiscountMap.get(ids);
             if (best != null && best.getDiscountAmount() >= solution.getDiscountAmount()) {
                 // 当前方案优惠金额少，跳过
@@ -127,6 +131,7 @@ public class DiscountServiceImpl implements IDiscountService {
             // 2.3.比较金额相同时，用券数量是否最少
             best = lessCouponMap.get(solution.getDiscountAmount());
             int size = solution.getIds().size();
+            // 单券不进行比较，直接加入map
             if (size > 1 && best != null && best.getIds().size() <= size) {
                 // 当前方案用券更多，放弃
                 continue;
@@ -144,8 +149,10 @@ public class DiscountServiceImpl implements IDiscountService {
                 .collect(Collectors.toList());
     }
 
-    private CouponDiscountDTO calculateSolutionDiscount(
-            Map<Coupon, List<OrderCourseDTO>> couponMap, List<OrderCourseDTO> courses, List<Coupon> solution) {
+    // 计算方案的优惠明细
+    private CouponDiscountDTO calculateSolutionDiscount(Map<Coupon, List<OrderCourseDTO>> couponMap,
+                                                        List<OrderCourseDTO> courses,
+                                                        List<Coupon> solution) {
         // 1.初始化DTO
         CouponDiscountDTO dto = new CouponDiscountDTO();
         // 2.初始化折扣明细的映射
@@ -169,15 +176,14 @@ public class DiscountServiceImpl implements IDiscountService {
             // 3.5.计算优惠明细
             calculateDiscountDetails(detailMap, availableCourses, totalAmount, discountAmount);
             // 3.6.更新DTO数据
-            dto.getIds().add(coupon.getCreater());
+            dto.getIds().add(coupon.getId());
             dto.getRules().add(discount.getRule(coupon));
             dto.setDiscountAmount(discountAmount + dto.getDiscountAmount());
         }
         return dto;
     }
 
-    private void calculateDiscountDetails(Map<Long, Integer> detailMap, List<OrderCourseDTO> courses,
-                                          int totalAmount, int discountAmount) {
+    private void calculateDiscountDetails(Map<Long, Integer> detailMap, List<OrderCourseDTO> courses, int totalAmount, int discountAmount) {
         int times = 0;
         int remainDiscount = discountAmount;
         for (OrderCourseDTO course : courses) {
@@ -186,10 +192,10 @@ public class DiscountServiceImpl implements IDiscountService {
             int discount = 0;
             // 判断是否是最后一个课程
             if (times == courses.size()) {
-                // 是最后一个课程，总折扣金额 - 之前所有商品的折扣金额之和
+                // 是最后一个课程，总折扣金额 - 之前所有商品的折扣金额之和，防止最后一个精度不正确
                 discount = remainDiscount;
             } else {
-                // 计算折扣明细（课程价格在总价中占的比例，乘以总的折扣）
+                // 计算折扣明细（课程价格在总价中占的比例，乘以总的折扣） 商品价格在总价格中的比例 * 优惠总金额  计算分摊在每个商品中的优惠价格
                 discount = discountAmount * course.getPrice() / totalAmount;
                 remainDiscount -= discount;
             }
@@ -198,8 +204,10 @@ public class DiscountServiceImpl implements IDiscountService {
         }
     }
 
-    private Map<Coupon, List<OrderCourseDTO>> findAvailableCoupon(
-            List<Coupon> coupons, List<OrderCourseDTO> courses) {
+    // 细筛
+    //  - 首先要基于优惠券的限定范围对课程筛选，找出可用课程。如果没有可用课程，则优惠券不可用。
+    //  - 然后对可用课程计算总价，判断是否达到优惠门槛，没有达到门槛则优惠券不可用
+    private Map<Coupon, List<OrderCourseDTO>> findAvailableCoupon(List<Coupon> coupons, List<OrderCourseDTO> courses) {
         Map<Coupon, List<OrderCourseDTO>> map = new HashMap<>(coupons.size());
         for (Coupon coupon : coupons) {
             // 1.找出优惠券的可用的课程

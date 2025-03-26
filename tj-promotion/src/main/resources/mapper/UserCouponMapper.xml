@@ -15,6 +15,7 @@
         WHERE uc.user_id = #{userId}
           AND uc.status = 1
     </select>
+
     <select id="queryCouponByUserCouponIds" resultType="com.tianji.promotion.domain.po.Coupon">
         SELECT c.id, c.discount_type, c.`specific`, c.discount_value, c.threshold_amount,
         c.max_discount_amount, uc.id AS creater
